@@ -1,0 +1,60 @@
+[project]
+name = "invoice-parser"
+version = "0.1.0"
+description = "Parse any cloud cost document into one canonical line-item schema"
+authors = [
+    { name = "xifeng jin", email = "xifeng.jin88@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "anthropic>=1.13.0",
+    "openai>=3.28.0",
+    "pdfplumber>=0.11.10",
+    "pillow>=12.3.0",
+    "polars>=2.0.0",
+    "pyarrow>=26.0.0",
+    "pydantic>=2.14.0",
+    "pypdfium2>=5.14.0",
+    "python-calamine>=0.8.3",
+    "python-dateutil>=2.9.0.post0",
+    "python-docx>=1.2.0",
+    "python-pptx>=1.0.2",
+    "pyyaml>=6.0.3",
+    "typer>=0.27.3",
+]
+
+[project.scripts]
+invoice-parser = "invoice_parser.cli:main"
+
+[project.optional-dependencies]
+deploy = [
+    "modal>=1.6.1",
+]
+viewer = [
+    "streamlit>=1.59.1",
+]
+docs = [
+    "ipykernel>=7.4.0",
+    "nbclient>=0.11.0",
+    "nbformat>=5.11.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.17,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.17.0",
+]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501", "B008"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

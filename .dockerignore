@@ -1,0 +1,14 @@
+# Input files and results never go into an image
+cost-estimate-inputs/
+out/
+.env
+.env.*
+.venv/
+**/__pycache__/
+.pytest_cache/
+.ruff_cache/
+.git/
+.DS_Store
+tests/
+app/
+out-*/

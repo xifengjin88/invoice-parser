@@ -1,0 +1,13 @@
+# The shared volume the workflow steps read and write. Adjust the storage class and size to the
+# cluster; several pods mount it at once, so it needs ReadWriteMany (for example EFS on AWS).
+# On a single-node test cluster (kind, minikube) ReadWriteOnce works too.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: invoice-parser-data
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 20Gi

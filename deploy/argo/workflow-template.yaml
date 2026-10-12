@@ -1,0 +1,184 @@
+# Argo WorkflowTemplate: parse every file in a folder, one pod per file.
+#
+#   kubectl apply -f deploy/argo/workflow-template.yaml
+#   argo submit --from workflowtemplate/invoice-parse -p input-path=/data/in/job-1 --watch
+#
+# The steps read and write local files on a shared volume mounted at /data:
+#   /data/in/...                 the files to parse (put there by whatever starts the workflow)
+#   /data/out/<job-id>/<n>/      results for the n-th file: one folder per document, summary.json
+#   /data/out/<job-id>/summary.json   everything together, written by the collect step
+#   /data/cache/llm              saved model answers, shared by all pods
+#
+# The model runs elsewhere (Modal today). Its URL and key come from the Secret
+# `invoice-parser-llm`; see secret.example.yaml. Pointing at a different endpoint later is a
+# change to that Secret only.
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: invoice-parse
+spec:
+  entrypoint: main
+  onExit: finish
+  activeDeadlineSeconds: 7200          # whole workflow, including a model cold start
+  ttlStrategy:
+    secondsAfterCompletion: 86400      # forget finished workflows after a day
+  podGC:
+    strategy: OnPodSuccess             # keep failed pods around for their logs
+  arguments:
+    parameters:
+      - name: input-path               # folder (or single file) under /data
+      - name: job-id
+        value: "{{workflow.name}}"
+      - name: image
+        value: invoice-parser:dev
+      - name: data-claim               # PersistentVolumeClaim mounted at /data
+        value: invoice-parser-data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: "{{workflow.parameters.data-claim}}"
+
+  templates:
+    - name: main
+      parallelism: 4                   # parse pods at once; they share one model endpoint
+      dag:
+        tasks:
+          - name: list-files
+            template: list-files
+          - name: parse
+            template: parse
+            dependencies: [list-files]
+            withParam: "{{tasks.list-files.outputs.result}}"
+            arguments:
+              parameters:
+                - name: file
+                  value: "{{item.path}}"
+                - name: slot
+                  value: "{{item.slot}}"
+          - name: collect
+            template: collect
+            dependencies: [parse]
+          - name: match-prices
+            template: match-prices
+            dependencies: [collect]
+            arguments:
+              parameters:
+                - name: status
+                  value: "{{tasks.collect.outputs.parameters.status}}"
+
+    # One entry per input file, so each gets its own pod and its own retries.
+    - name: list-files
+      script:
+        image: "{{workflow.parameters.image}}"
+        command: [python]
+        source: |
+          import json, os, sys
+          root = "{{workflow.parameters.input-path}}"
+          if os.path.isfile(root):
+              files = [root]
+          else:
+              files = sorted(
+                  os.path.join(folder, name)
+                  for folder, _, names in os.walk(root)
+                  for name in names
+                  if not name.startswith(".")
+              )
+          if not files:
+              sys.exit(f"nothing to parse under {root}")
+          json.dump([{"path": p, "slot": str(i)} for i, p in enumerate(files)], sys.stdout)
+        volumeMounts:
+          - name: data
+            mountPath: /data
+
+    # The parser as a black box: a local file in, results and a status out.
+    - name: parse
+      inputs:
+        parameters:
+          - name: file
+          - name: slot
+      retryStrategy:                   # exit code 1 means "could not process", e.g. model unreachable
+        limit: "2"
+        retryPolicy: OnFailure
+        backoff:
+          duration: "30s"
+          factor: "2"
+      activeDeadlineSeconds: 3600
+      container:
+        image: "{{workflow.parameters.image}}"
+        command: [invoice-parser, job]
+        args:
+          - "{{inputs.parameters.file}}"
+          - --out
+          - "/data/out/{{workflow.parameters.job-id}}/{{inputs.parameters.slot}}"
+          - --cache
+          - /data/cache/llm
+          - --status-file
+          - /tmp/status
+        envFrom:
+          - secretRef:
+              name: invoice-parser-llm
+        resources:
+          requests:
+            cpu: "1"
+            memory: 2Gi
+          limits:
+            memory: 4Gi                # the 1 GB usage report peaked near 1.2 GB
+        volumeMounts:
+          - name: data
+            mountPath: /data
+      outputs:
+        parameters:
+          - name: status
+            valueFrom:
+              path: /tmp/status
+
+    # Put the per-file summaries together and report the worst status.
+    - name: collect
+      script:
+        image: "{{workflow.parameters.image}}"
+        command: [python]
+        source: |
+          import glob, json
+          root = "/data/out/{{workflow.parameters.job-id}}"
+          order = {"skip": 0, "pass": 1, "warn": 2, "fail": 3}
+          parts = [json.load(open(p)) for p in sorted(glob.glob(f"{root}/*/summary.json"))]
+          status = max((p["status"] for p in parts), key=order.__getitem__, default="fail")
+          combined = {
+              "status": status,
+              "line_items": sum(p["line_items"] for p in parts),
+              "documents": [d for p in parts for d in p["documents"]],
+          }
+          json.dump(combined, open(f"{root}/summary.json", "w"), indent=1)
+          open("/tmp/status", "w").write(status)
+          print(f"{len(combined['documents'])} document(s), {combined['line_items']} line item(s): {status}")
+        volumeMounts:
+          - name: data
+            mountPath: /data
+      outputs:
+        parameters:
+          - name: status
+            valueFrom:
+              path: /tmp/status
+
+    # Placeholder for the next stage: read the parsed rows under
+    # /data/out/<job-id>/ and match them against the pricing catalog.
+    - name: match-prices
+      inputs:
+        parameters:
+          - name: status
+      container:
+        image: "{{workflow.parameters.image}}"
+        command: [python, -c]
+        args:
+          - |
+            print("parse status: {{inputs.parameters.status}}")
+            print("price matching is not built yet; parsed rows are under /data/out/{{workflow.parameters.job-id}}/")
+
+    # Always runs. This is where the caller is told the outcome (update a job row, call a webhook).
+    - name: finish
+      container:
+        image: "{{workflow.parameters.image}}"
+        command: [python, -c]
+        args:
+          - |
+            print("workflow {{workflow.name}} finished: {{workflow.status}}")
